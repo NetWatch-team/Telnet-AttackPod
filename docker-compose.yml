@@ -1,0 +1,27 @@
+services:
+  NetWatchTelnetAttackPod:
+    image: docker.netwatch.team/netwatch_telnet-attackpod:0.1
+    container_name: netwatch_telent-attackpod 
+    environment:
+      SENSOR_UUID: ""
+      SENSOR_TLP: "CLEAR"
+      NETWATCH_COLLECTOR_AUTHORIZATION: ${NETWATCH_COLLECTOR_AUTHORIZATINON}
+      NETWATCH_COLLECTOR_URL: "https://api.netwatch.dev"
+      ATTACK_POD_IP: "<ip>"
+      #NETWATCH_TEST_MODE: True
+    restart: unless-stopped
+    ports:
+      - "23:23"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: 750M
+        reservations:
+          cpus: "0.25"
+          memory: 200M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10M"
+        max-file: "2"
