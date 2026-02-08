@@ -1,7 +1,7 @@
 services:
   NetWatchTelnetAttackPod:
     build: .
-    image: docker.netwatch.team/netwatch_telnet-attackpod:1.0
+    image: netwatchteam/netwatch_telnet-attackpod:0.2
     container_name: netwatch_telnet-attackpod
     environment:
       SENSOR_UUID: "your-unique-uuid-here"
