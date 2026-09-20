@@ -62,6 +62,21 @@ class TestMonitorAdvancedFunctions(unittest.TestCase):
                 get_local_ip(max_retries=2, retry_delay=0)
             mock_exit.assert_called_once_with(1)
 
+    def test_handle_client_releases_semaphore(self):
+        """Test that handle_client always releases the semaphore"""
+        import threading
+        from monitor import handle_client
+        
+        sem = threading.BoundedSemaphore(1)
+        self.assertTrue(sem.acquire(blocking=False))
+        
+        mock_socket = MagicMock()
+        mock_socket.recv.return_value = b""
+        
+        handle_client(mock_socket, "1.2.3.4", semaphore=sem)
+        # Verify semaphore was released back
+        self.assertTrue(sem.acquire(blocking=False))
+
 
 if __name__ == '__main__':
     unittest.main()

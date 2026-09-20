@@ -40,6 +40,7 @@ IP_RETRY_DELAY_SECONDS = int(os.getenv("IP_RETRY_DELAY_SECONDS", "10"))  # delay
 TELNET_INTERNAL_PORT = os.getenv("TELNET_INTERNAL_PORT", "2323")  # non-privileged port inside Docker
 TELNET_LISTEN_BACKLOG = int(os.getenv("TELNET_LISTEN_BACKLOG", "100"))  # max queued connections
 CLIENT_TIMEOUT_SECONDS = int(os.getenv("CLIENT_TIMEOUT_SECONDS", "30"))  # timeout for client connections
+MAX_CONCURRENT_CLIENTS = int(os.getenv("MAX_CONCURRENT_CLIENTS", "100"))  # max concurrent client connections
 
 # Telnet Protocol Constants
 TELNET_IAC = int(os.getenv("TELNET_IAC", "255"))  # Interpret As Command byte
@@ -345,7 +346,11 @@ def telnet_read_filtered_input(client_socket: socket.socket) -> str:
         return ""
 
 
-def handle_client(client_socket: socket.socket, ATTACKPOD_LOCAL_IP: str) -> None:
+def handle_client(
+    client_socket: socket.socket, 
+    ATTACKPOD_LOCAL_IP: str, 
+    semaphore: Optional[threading.BoundedSemaphore] = None
+) -> None:
     """
     Handle a single Telnet client connection.
     
@@ -363,6 +368,7 @@ def handle_client(client_socket: socket.socket, ATTACKPOD_LOCAL_IP: str) -> None
     Args:
         client_socket: Connected client socket
         ATTACKPOD_LOCAL_IP: This sensor's public IP address
+        semaphore: Optional semaphore released when the connection finishes
     """
     client_socket.settimeout(CLIENT_TIMEOUT_SECONDS)
     
@@ -427,13 +433,18 @@ def handle_client(client_socket: socket.socket, ATTACKPOD_LOCAL_IP: str) -> None
             client_socket.close()
         except:
             pass
+        if semaphore:
+            semaphore.release()
 
 
 # ============================================================================
 # SERVER MAIN LOOP
 # ============================================================================
 
-def start_telnet_server(local_ip: str) -> None:
+def start_telnet_server(
+    local_ip: str, 
+    max_clients: int = MAX_CONCURRENT_CLIENTS
+) -> None:
     """
     Start the main Telnet server loop.
     
@@ -446,6 +457,7 @@ def start_telnet_server(local_ip: str) -> None:
     
     Args:
         local_ip: This sensor's public IP address (for attack reporting)
+        max_clients: Maximum concurrent active client connections permitted
     """
     # Create TCP socket
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -455,8 +467,11 @@ def start_telnet_server(local_ip: str) -> None:
     server.bind(('0.0.0.0', TELNET_INTERNAL_PORT))
     server.listen(TELNET_LISTEN_BACKLOG)
     
+    semaphore = threading.BoundedSemaphore(max_clients)
+
     logging.info(f"[+] Telnet server listening on internal port {TELNET_INTERNAL_PORT}")
     logging.info(f"[+] Attack submissions will report destination IP: {local_ip}")
+    logging.info(f"[+] Max concurrent client connections: {max_clients}")
 
     # Main accept loop
     while True:
@@ -464,11 +479,27 @@ def start_telnet_server(local_ip: str) -> None:
             client_socket, addr = server.accept()
             logging.debug(f"[+] Connection from {addr[0]}:{addr[1]}")
             
+            # Non-blocking acquisition to protect against DoS / connection floods
+            if not semaphore.acquire(blocking=False):
+                logging.warning(
+                    f"[!] Connection limit ({max_clients}) reached. "
+                    f"Rejecting connection from {addr[0]}:{addr[1]}"
+                )
+                try:
+                    client_socket.sendall(b"Server busy. Connection closed.\r\n")
+                except:
+                    pass
+                try:
+                    client_socket.close()
+                except:
+                    pass
+                continue
+
             # Spawn a new daemon thread to handle this client
             # Daemon threads automatically terminate when main program exits
             threading.Thread(
                 target=handle_client, 
-                args=(client_socket, local_ip), 
+                args=(client_socket, local_ip, semaphore), 
                 daemon=True
             ).start()
             
