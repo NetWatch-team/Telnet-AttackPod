@@ -43,13 +43,20 @@ CLIENT_TIMEOUT_SECONDS = int(os.getenv("CLIENT_TIMEOUT_SECONDS", "30"))  # timeo
 MAX_CONCURRENT_CLIENTS = int(os.getenv("MAX_CONCURRENT_CLIENTS", "100"))  # max concurrent client connections
 
 # Telnet Protocol Constants
-TELNET_IAC = int(os.getenv("TELNET_IAC", "255"))  # Interpret As Command byte
-TELNET_COMMAND_LENGTH = int(os.getenv("TELNET_COMMAND_LENGTH", "3"))  # IAC commands are typically 3 bytes
+TELNET_IAC = int(os.getenv("TELNET_IAC", "255"))  # Interpret As Command byte (0xFF)
+TELNET_DONT = 254
+TELNET_DO = 253
+TELNET_WONT = 252
+TELNET_WILL = 251
+TELNET_SB = 250   # Subnegotiation Begin
+TELNET_SE = 240   # Subnegotiation End
+TELNET_COMMAND_LENGTH = int(os.getenv("TELNET_COMMAND_LENGTH", "3"))  # Standard option negotiation command length
 
 # Input Processing Configuration
 MAX_INPUT_RETRIES = int(os.getenv("MAX_INPUT_RETRIES", "30"))  # max attempts to read username/password
 INPUT_RETRY_DELAY = float(os.getenv("INPUT_RETRY_DELAY", "0.1"))  # delay between empty input retries (seconds)
 SOCKET_RECV_BUFFER = int(os.getenv("SOCKET_RECV_BUFFER", "1024"))  # bytes to read at once
+MAX_INPUT_LENGTH = int(os.getenv("MAX_INPUT_LENGTH", "256"))  # max chars allowed for username/password
 
 # ============================================================================
 # GLOBAL STATE
@@ -303,47 +310,119 @@ def attack_forward_worker() -> None:
 # TELNET PROTOCOL HANDLING
 # ============================================================================
 
-def telnet_read_filtered_input(client_socket: socket.socket) -> str:
+def filter_telnet_iac(data: bytes) -> Tuple[bytearray, bytes]:
     """
-    Read from a Telnet socket and filter out IAC (Interpret As Command) sequences.
+    Filter out Telnet IAC (Interpret As Command) sequences per RFC 854.
     
-    Telnet uses in-band signaling where command bytes (starting with 0xFF)
-    are mixed with user data. This function strips out the IAC command
-    sequences and returns only the actual text entered by the user.
+    Handles:
+    - Escaped IAC (0xFF 0xFF) -> literal 0xFF
+    - Option negotiation (WILL, WONT, DO, DONT) -> 3 bytes
+    - Subnegotiation (SB ... SE) -> variable length
+    - Other 2-byte commands (NOP, DM, etc.) -> 2 bytes
     
-    IAC commands are typically 3 bytes: [0xFF] [COMMAND] [OPTION]
+    Args:
+        data: Raw byte stream received from socket
+        
+    Returns:
+        Tuple of (clean_payload_bytes, remaining_incomplete_iac_bytes)
+    """
+    clean_data = bytearray()
+    i = 0
+    n = len(data)
+    
+    while i < n:
+        if data[i] == TELNET_IAC:
+            # If IAC is at the very end with no command byte, return as leftover
+            if i + 1 >= n:
+                return clean_data, data[i:]
+            
+            cmd = data[i + 1]
+            if cmd == TELNET_IAC:
+                # Escaped IAC (0xFF 0xFF) evaluates to literal 0xFF data
+                clean_data.append(TELNET_IAC)
+                i += 2
+            elif cmd in (TELNET_WILL, TELNET_WONT, TELNET_DO, TELNET_DONT):
+                # 3-byte command: IAC <verb> <option>
+                if i + 2 >= n:
+                    # Incomplete 3-byte command
+                    return clean_data, data[i:]
+                i += 3
+            elif cmd == TELNET_SB:
+                # Subnegotiation: IAC SB ... IAC SE
+                # Look for terminating IAC SE (0xFF 0xF0)
+                se_index = -1
+                j = i + 2
+                while j < n:
+                    if data[j] == TELNET_IAC and j + 1 < n and data[j + 1] == TELNET_SE:
+                        se_index = j + 1
+                        break
+                    j += 1
+                if se_index != -1:
+                    i = se_index + 1
+                else:
+                    # Incomplete subnegotiation, wait for more data
+                    return clean_data, data[i:]
+            else:
+                # Other 2-byte commands (NOP, BREAK, IP, AO, AYT, EC, EL, GA)
+                i += 2
+        else:
+            clean_data.append(data[i])
+            i += 1
+            
+    return clean_data, b""
+
+
+def telnet_read_filtered_input(
+    client_socket: socket.socket, 
+    max_length: int = MAX_INPUT_LENGTH
+) -> str:
+    """
+    Read a complete line from a Telnet socket, filtering out IAC command sequences
+    and respecting maximum input length caps.
+    
+    Accumulates data until a newline (\\r or \\n) delimiter is encountered or
+    until max retries/timeouts are reached.
     
     Args:
         client_socket: Connected client socket
+        max_length: Maximum allowed characters to prevent memory exhaustion
         
     Returns:
         Clean text input from user, or empty string on error/no data
     """
-    try:
-        data = client_socket.recv(SOCKET_RECV_BUFFER)
-        if not data:
-            return ""
-
-        # Filter out Telnet IAC (0xFF) command sequences
-        clean_data = bytearray()
-        i = 0
-        while i < len(data):
-            if data[i] == TELNET_IAC:
-                # Skip this IAC command (typically 3 bytes)
-                i += TELNET_COMMAND_LENGTH
+    accumulated_clean = bytearray()
+    iac_buffer = b""
+    retries = 0
+    
+    while retries < MAX_INPUT_RETRIES and len(accumulated_clean) < max_length:
+        try:
+            raw_chunk = client_socket.recv(SOCKET_RECV_BUFFER)
+            if not raw_chunk:
+                break
+            
+            # Combine leftover incomplete IAC bytes with newly received chunk
+            clean_chunk, iac_buffer = filter_telnet_iac(iac_buffer + raw_chunk)
+            
+            if clean_chunk:
+                accumulated_clean.extend(clean_chunk)
+                
+                # Check for line completion (\r or \n)
+                if b"\n" in clean_chunk or b"\r" in clean_chunk:
+                    break
             else:
-                # Regular user data - keep it
-                clean_data.append(data[i])
-                i += 1
-
-        # Decode to UTF-8, ignoring invalid sequences
-        return clean_data.decode('utf-8', errors='ignore').strip()
-        
-    except socket.timeout:
-        return ""
-    except Exception as e:
-        logging.debug(f"Error reading from socket: {e}")
-        return ""
+                # Only IAC commands received in this chunk
+                retries += 1
+                time.sleep(INPUT_RETRY_DELAY)
+                
+        except socket.timeout:
+            break
+        except Exception as e:
+            logging.debug(f"Error reading from socket: {e}")
+            break
+            
+    # Decode to UTF-8, strip whitespace and line endings, enforce max length cap
+    decoded = accumulated_clean.decode("utf-8", errors="ignore").strip()
+    return decoded[:max_length]
 
 
 def handle_client(

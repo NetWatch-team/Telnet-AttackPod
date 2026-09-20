@@ -77,6 +77,51 @@ class TestMonitorAdvancedFunctions(unittest.TestCase):
         # Verify semaphore was released back
         self.assertTrue(sem.acquire(blocking=False))
 
+    def test_filter_telnet_iac(self):
+        """Test RFC 854 IAC filtering logic"""
+        from monitor import filter_telnet_iac
+        
+        # Test basic text without commands
+        clean, rem = filter_telnet_iac(b"admin\r\n")
+        self.assertEqual(clean, bytearray(b"admin\r\n"))
+        self.assertEqual(rem, b"")
+        
+        # Test 3-byte WILL / WONT command stripping
+        clean, rem = filter_telnet_iac(b"\xff\xfb\x01user\r\n")
+        self.assertEqual(clean, bytearray(b"user\r\n"))
+        self.assertEqual(rem, b"")
+        
+        # Test escaped IAC (0xFF 0xFF -> 0xFF)
+        clean, rem = filter_telnet_iac(b"\xff\xff")
+        self.assertEqual(clean, bytearray(b"\xff"))
+        self.assertEqual(rem, b"")
+        
+        # Test subnegotiation stripping (IAC SB ... IAC SE)
+        clean, rem = filter_telnet_iac(b"\xff\xfa\x18\x00VT100\xff\xf0pass\r\n")
+        self.assertEqual(clean, bytearray(b"pass\r\n"))
+        self.assertEqual(rem, b"")
+        
+        # Test trailing incomplete IAC byte
+        clean, rem = filter_telnet_iac(b"abc\xff")
+        self.assertEqual(clean, bytearray(b"abc"))
+        self.assertEqual(rem, b"\xff")
+
+    def test_telnet_read_filtered_input_buffering_and_caps(self):
+        """Test buffered line reading and max length capping"""
+        from monitor import telnet_read_filtered_input
+        
+        mock_socket = MagicMock()
+        # Simulate fragmented chunk delivery across two packets
+        mock_socket.recv.side_effect = [b"root", b"admin\r\n"]
+        result = telnet_read_filtered_input(mock_socket, max_length=50)
+        self.assertEqual(result, "rootadmin")
+        
+        # Test length capping
+        mock_socket.recv.side_effect = [b"A" * 100 + b"\r\n"]
+        result = telnet_read_filtered_input(mock_socket, max_length=10)
+        self.assertEqual(len(result), 10)
+        self.assertEqual(result, "A" * 10)
+
 
 if __name__ == '__main__':
     unittest.main()
