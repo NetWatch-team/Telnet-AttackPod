@@ -20,8 +20,11 @@ import threading
 import time
 import socket
 import queue
-import json
 import sys
+import signal
+
+# Global shutdown event to coordinate graceful termination
+shutdown_event = threading.Event()
 
 # ============================================================================
 # CONFIGURATION CONSTANTS
@@ -306,9 +309,12 @@ def attack_forward_worker() -> None:
 
     logging.info("[+] Attack forwarding worker started")
 
-    while True:
-        # Block until an attack is available
-        json_dict = attack_queue.get()
+    while not shutdown_event.is_set() or not attack_queue.empty():
+        try:
+            # Poll with timeout to periodically check shutdown_event
+            json_dict = attack_queue.get(timeout=1.0)
+        except queue.Empty:
+            continue
         
         try:
             response = session.post(url, json=json_dict, timeout=COLLECTOR_REQUEST_TIMEOUT)
@@ -592,39 +598,58 @@ def start_telnet_server(
     logging.info(f"[+] Attack submissions will report destination IP: {local_ip}")
     logging.info(f"[+] Max concurrent client connections: {max_clients}")
 
-    # Main accept loop
-    while True:
+    # Main accept loop with timeout to allow checking shutdown_event
+    server.settimeout(1.0)
+    
+    while not shutdown_event.is_set():
         try:
             client_socket, addr = server.accept()
-            logging.debug(f"[+] Connection from {addr[0]}:{addr[1]}")
-            
-            # Non-blocking acquisition to protect against DoS / connection floods
-            if not semaphore.acquire(blocking=False):
-                logging.warning(
-                    f"[!] Connection limit ({max_clients}) reached. "
-                    f"Rejecting connection from {addr[0]}:{addr[1]}"
-                )
-                try:
-                    client_socket.sendall(b"Server busy. Connection closed.\r\n")
-                except:
-                    pass
-                try:
-                    client_socket.close()
-                except:
-                    pass
-                continue
-
-            # Spawn a new daemon thread to handle this client
-            # Daemon threads automatically terminate when main program exits
-            threading.Thread(
-                target=handle_client, 
-                args=(client_socket, local_ip, semaphore), 
-                daemon=True
-            ).start()
-            
+        except socket.timeout:
+            continue
+        except OSError:
+            # Socket closed during shutdown
+            break
         except Exception as e:
             logging.error(f"[!] Error accepting connection: {e}")
-            # Continue listening despite errors
+            continue
+
+        logging.debug(f"[+] Connection from {addr[0]}:{addr[1]}")
+        
+        # Non-blocking acquisition to protect against DoS / connection floods
+        if not semaphore.acquire(blocking=False):
+            logging.warning(
+                f"[!] Connection limit ({max_clients}) reached. "
+                f"Rejecting connection from {addr[0]}:{addr[1]}"
+            )
+            try:
+                client_socket.sendall(b"Server busy. Connection closed.\r\n")
+            except:
+                pass
+            try:
+                client_socket.close()
+            except:
+                pass
+            continue
+
+        # Spawn a new daemon thread to handle this client
+        threading.Thread(
+            target=handle_client, 
+            args=(client_socket, local_ip, semaphore), 
+            daemon=True
+        ).start()
+
+    logging.info("[+] Shutting down server socket...")
+    try:
+        server.close()
+    except:
+        pass
+
+
+def handle_shutdown_signal(signum, frame) -> None:
+    """Handle termination signals (SIGTERM, SIGINT) gracefully."""
+    sig_name = signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
+    logging.info(f"[+] Received shutdown signal {sig_name}. Initiating graceful shutdown...")
+    shutdown_event.set()
 
 
 # ============================================================================
@@ -632,6 +657,10 @@ def start_telnet_server(
 # ============================================================================
 
 if __name__ == '__main__':
+    # Register graceful signal handlers
+    signal.signal(signal.SIGINT, handle_shutdown_signal)
+    signal.signal(signal.SIGTERM, handle_shutdown_signal)
+
     logging.info("=" * 60)
     logging.info("[+] Starting NetWatch Telnet AttackPod")
     logging.info("=" * 60)
@@ -661,7 +690,13 @@ if __name__ == '__main__':
     logging.info(f"[+] TLP Level: {get_env('SENSOR_TLP', 'CLEAR')}")
 
     # Start the background worker thread for attack forwarding
-    threading.Thread(target=attack_forward_worker, daemon=True).start()
+    worker_thread = threading.Thread(target=attack_forward_worker, daemon=True)
+    worker_thread.start()
 
-    # Start the main Telnet server (runs in main thread)
+    # Start the main Telnet server (runs in main thread until shutdown_event)
     start_telnet_server(ATTACKPOD_LOCAL_IP)
+
+    # Wait for attack queue to drain before full process termination
+    logging.info("[+] Flushing remaining queued attacks...")
+    worker_thread.join(timeout=5.0)
+    logging.info("[+] NetWatch Telnet AttackPod stopped cleanly.")

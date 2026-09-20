@@ -158,6 +158,17 @@ class TestMonitorAdvancedFunctions(unittest.TestCase):
             validate_configuration()
             self.assertTrue(mock_warn.called)
 
+    def test_handle_shutdown_signal(self):
+        """Test that handle_shutdown_signal sets shutdown_event"""
+        import signal
+        from monitor import handle_shutdown_signal, shutdown_event
+        
+        shutdown_event.clear()
+        self.assertFalse(shutdown_event.is_set())
+        handle_shutdown_signal(signal.SIGTERM, None)
+        self.assertTrue(shutdown_event.is_set())
+        shutdown_event.clear()
+
 
 if __name__ == '__main__':
     unittest.main()
