@@ -1,8 +1,8 @@
 services:
   NetWatchTelnetAttackPod:
     build: 
-      context: .
-      dockerfile: src/Dockerfile
+      context: src
+      dockerfile: Dockerfile
     image: netwatchteam/netwatch_telnet-attackpod:0.2
     container_name: netwatch_telnet-attackpod
     environment:

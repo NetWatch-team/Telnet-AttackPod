@@ -15,6 +15,6 @@ docker buildx build \
   --platform linux/amd64,linux/arm64 \
   --tag netwatchteam/netwatch_telnet-attackpod:v0.2 \
   --output "type=image,push=false" \
-  -f src/Dockerfile .
+  -f src/Dockerfile src/
 
 echo "Multi-architecture build complete!"
