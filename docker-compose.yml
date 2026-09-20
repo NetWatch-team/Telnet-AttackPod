@@ -1,6 +1,8 @@
 services:
   NetWatchTelnetAttackPod:
-    build: .
+    build: 
+      context: .
+      dockerfile: src/Dockerfile
     image: netwatchteam/netwatch_telnet-attackpod:0.2
     container_name: netwatch_telnet-attackpod
     environment:
@@ -11,6 +13,8 @@ services:
       ATTACK_POD_IP: "" # Leave empty for auto-detection
       NETWATCH_TEST_MODE: "false"
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "23:2323"
     deploy:
