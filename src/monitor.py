@@ -13,6 +13,7 @@ import ipaddress
 import logging
 import requests
 import os
+import random
 from datetime import datetime
 from typing import Optional, Tuple
 import threading
@@ -27,26 +28,26 @@ import json
 
 # NetWatch Collector Configuration
 DEFAULT_COLLECTOR_URL = "https://api.netwatch.team"
-COLLECTOR_REQUEST_TIMEOUT = int(get_env("COLLECTOR_REQUEST_TIMEOUT", "10"))  # seconds for API requests
-CHECK_IP_TIMEOUT = int(get_env("CHECK_IP_TIMEOUT", "5"))  # seconds for IP check requests
+COLLECTOR_REQUEST_TIMEOUT = int(os.getenv("COLLECTOR_REQUEST_TIMEOUT", "10"))  # seconds for API requests
+CHECK_IP_TIMEOUT = int(os.getenv("CHECK_IP_TIMEOUT", "5"))  # seconds for IP check requests
 
 # IP Detection Configuration
-MAX_IP_RETRY_ATTEMPTS = int(get_env("MAX_IP_RETRY_ATTEMPTS", "50"))  # max attempts to get local IP
-IP_RETRY_DELAY_SECONDS = int(get_env("IP_RETRY_DELAY_SECONDS", "10"))  # delay between IP detection retries
+MAX_IP_RETRY_ATTEMPTS = int(os.getenv("MAX_IP_RETRY_ATTEMPTS", "50"))  # max attempts to get local IP
+IP_RETRY_DELAY_SECONDS = int(os.getenv("IP_RETRY_DELAY_SECONDS", "10"))  # delay between IP detection retries
 
 # Telnet Server Configuration
-TELNET_INTERNAL_PORT = get_env("TELNET_INTERNAL_PORT", "2323")  # non-privileged port inside Docker
-TELNET_LISTEN_BACKLOG = int(get_env("TELNET_LISTEN_BACKLOG", "100"))  # max queued connections
-CLIENT_TIMEOUT_SECONDS = int(get_env("CLIENT_TIMEOUT_SECONDS", "30"))  # timeout for client connections
+TELNET_INTERNAL_PORT = os.getenv("TELNET_INTERNAL_PORT", "2323")  # non-privileged port inside Docker
+TELNET_LISTEN_BACKLOG = int(os.getenv("TELNET_LISTEN_BACKLOG", "100"))  # max queued connections
+CLIENT_TIMEOUT_SECONDS = int(os.getenv("CLIENT_TIMEOUT_SECONDS", "30"))  # timeout for client connections
 
 # Telnet Protocol Constants
-TELNET_IAC = int(get_env("TELNET_IAC", "255"))  # Interpret As Command byte
-TELNET_COMMAND_LENGTH = int(get_env("TELNET_COMMAND_LENGTH", "3"))  # IAC commands are typically 3 bytes
+TELNET_IAC = int(os.getenv("TELNET_IAC", "255"))  # Interpret As Command byte
+TELNET_COMMAND_LENGTH = int(os.getenv("TELNET_COMMAND_LENGTH", "3"))  # IAC commands are typically 3 bytes
 
 # Input Processing Configuration
-MAX_INPUT_RETRIES = int(get_env("MAX_INPUT_RETRIES", "30"))  # max attempts to read username/password
-INPUT_RETRY_DELAY = float(get_env("INPUT_RETRY_DELAY", "0.1"))  # delay between empty input retries (seconds)
-SOCKET_RECV_BUFFER = int(get_env("SOCKET_RECV_BUFFER", "1024"))  # bytes to read at once
+MAX_INPUT_RETRIES = int(os.getenv("MAX_INPUT_RETRIES", "30"))  # max attempts to read username/password
+INPUT_RETRY_DELAY = float(os.getenv("INPUT_RETRY_DELAY", "0.1"))  # delay between empty input retries (seconds)
+SOCKET_RECV_BUFFER = int(os.getenv("SOCKET_RECV_BUFFER", "1024"))  # bytes to read at once
 
 # ============================================================================
 # GLOBAL STATE
@@ -94,14 +95,28 @@ def _check_if_in_test_mode() -> bool:
     return get_env("NETWATCH_TEST_MODE", "false").lower() == "true"
 
 
+# Private and non-routable network ranges per RFC 1918 and related standards
+PRIVATE_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+)
+
+
 def is_private_ip(ip: str) -> bool:
     """
     Check if an IP address is private/non-routable per RFC 1918 and related standards.
     
     This includes:
     - RFC 1918 Private Networks: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-    - Loopback Addresses: 127.0.0.0/8
-    - Link-Local Addresses: 169.254.0.0/16
+    - Loopback Addresses: 127.0.0.0/8, ::1/128
+    - Link-Local Addresses: 169.254.0.0/16, fe80::/10
+    - Unique Local IPv6: fc00::/7
     
     Args:
         ip: IP address string to check
@@ -111,7 +126,7 @@ def is_private_ip(ip: str) -> bool:
     """
     try:
         ip_obj = ipaddress.ip_address(ip)
-        return ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local
+        return any(ip_obj in net for net in PRIVATE_NETWORKS)
     except ValueError:
         logging.warning(f"Invalid IP address format: {ip}")
         return False
@@ -230,8 +245,10 @@ def attack_forward_worker() -> None:
     """
     # Use Session for connection pooling (more efficient than individual requests)
     session = requests.Session()
+    # Set a User-Agent header for better identification
     session.headers.update({
-        "Authorization": get_env("NETWATCH_COLLECTOR_AUTHORIZATION", "")
+        "Authorization": get_env("NETWATCH_COLLECTOR_AUTHORIZATION", ""),
+        "User-Agent": "NetWatch-Telnet-AttackPod/0.2"
     })
     url = f"{get_env('NETWATCH_COLLECTOR_URL', DEFAULT_COLLECTOR_URL)}/v2/add_attack/telnet_bruteforce"
 
