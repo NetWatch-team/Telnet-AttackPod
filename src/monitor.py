@@ -13,6 +13,7 @@ import ipaddress
 import logging
 import requests
 import os
+import random
 from datetime import datetime
 from typing import Optional, Tuple
 import threading
@@ -20,6 +21,7 @@ import time
 import socket
 import queue
 import json
+import sys
 
 # ============================================================================
 # CONFIGURATION CONSTANTS
@@ -27,26 +29,34 @@ import json
 
 # NetWatch Collector Configuration
 DEFAULT_COLLECTOR_URL = "https://api.netwatch.team"
-COLLECTOR_REQUEST_TIMEOUT = int(get_env("COLLECTOR_REQUEST_TIMEOUT", "10"))  # seconds for API requests
-CHECK_IP_TIMEOUT = int(get_env("CHECK_IP_TIMEOUT", "5"))  # seconds for IP check requests
+COLLECTOR_REQUEST_TIMEOUT = int(os.getenv("COLLECTOR_REQUEST_TIMEOUT", "10"))  # seconds for API requests
+CHECK_IP_TIMEOUT = int(os.getenv("CHECK_IP_TIMEOUT", "5"))  # seconds for IP check requests
 
 # IP Detection Configuration
-MAX_IP_RETRY_ATTEMPTS = int(get_env("MAX_IP_RETRY_ATTEMPTS", "50"))  # max attempts to get local IP
-IP_RETRY_DELAY_SECONDS = int(get_env("IP_RETRY_DELAY_SECONDS", "10"))  # delay between IP detection retries
+MAX_IP_RETRY_ATTEMPTS = int(os.getenv("MAX_IP_RETRY_ATTEMPTS", "50"))  # max attempts to get local IP
+IP_RETRY_DELAY_SECONDS = int(os.getenv("IP_RETRY_DELAY_SECONDS", "10"))  # delay between IP detection retries
 
 # Telnet Server Configuration
-TELNET_INTERNAL_PORT = get_env("TELNET_INTERNAL_PORT", "2323")  # non-privileged port inside Docker
-TELNET_LISTEN_BACKLOG = int(get_env("TELNET_LISTEN_BACKLOG", "100"))  # max queued connections
-CLIENT_TIMEOUT_SECONDS = int(get_env("CLIENT_TIMEOUT_SECONDS", "30"))  # timeout for client connections
+TELNET_INTERNAL_PORT = os.getenv("TELNET_INTERNAL_PORT", "2323")  # non-privileged port inside Docker
+TELNET_LISTEN_BACKLOG = int(os.getenv("TELNET_LISTEN_BACKLOG", "100"))  # max queued connections
+CLIENT_TIMEOUT_SECONDS = int(os.getenv("CLIENT_TIMEOUT_SECONDS", "30"))  # timeout for client connections
+MAX_CONCURRENT_CLIENTS = int(os.getenv("MAX_CONCURRENT_CLIENTS", "100"))  # max concurrent client connections
 
 # Telnet Protocol Constants
-TELNET_IAC = int(get_env("TELNET_IAC", "255"))  # Interpret As Command byte
-TELNET_COMMAND_LENGTH = int(get_env("TELNET_COMMAND_LENGTH", "3"))  # IAC commands are typically 3 bytes
+TELNET_IAC = int(os.getenv("TELNET_IAC", "255"))  # Interpret As Command byte (0xFF)
+TELNET_DONT = 254
+TELNET_DO = 253
+TELNET_WONT = 252
+TELNET_WILL = 251
+TELNET_SB = 250   # Subnegotiation Begin
+TELNET_SE = 240   # Subnegotiation End
+TELNET_COMMAND_LENGTH = int(os.getenv("TELNET_COMMAND_LENGTH", "3"))  # Standard option negotiation command length
 
 # Input Processing Configuration
-MAX_INPUT_RETRIES = int(get_env("MAX_INPUT_RETRIES", "30"))  # max attempts to read username/password
-INPUT_RETRY_DELAY = float(get_env("INPUT_RETRY_DELAY", "0.1"))  # delay between empty input retries (seconds)
-SOCKET_RECV_BUFFER = int(get_env("SOCKET_RECV_BUFFER", "1024"))  # bytes to read at once
+MAX_INPUT_RETRIES = int(os.getenv("MAX_INPUT_RETRIES", "30"))  # max attempts to read username/password
+INPUT_RETRY_DELAY = float(os.getenv("INPUT_RETRY_DELAY", "0.1"))  # delay between empty input retries (seconds)
+SOCKET_RECV_BUFFER = int(os.getenv("SOCKET_RECV_BUFFER", "1024"))  # bytes to read at once
+MAX_INPUT_LENGTH = int(os.getenv("MAX_INPUT_LENGTH", "256"))  # max chars allowed for username/password
 
 # ============================================================================
 # GLOBAL STATE
@@ -94,14 +104,28 @@ def _check_if_in_test_mode() -> bool:
     return get_env("NETWATCH_TEST_MODE", "false").lower() == "true"
 
 
+# Private and non-routable network ranges per RFC 1918 and related standards
+PRIVATE_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+)
+
+
 def is_private_ip(ip: str) -> bool:
     """
     Check if an IP address is private/non-routable per RFC 1918 and related standards.
     
     This includes:
     - RFC 1918 Private Networks: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-    - Loopback Addresses: 127.0.0.0/8
-    - Link-Local Addresses: 169.254.0.0/16
+    - Loopback Addresses: 127.0.0.0/8, ::1/128
+    - Link-Local Addresses: 169.254.0.0/16, fe80::/10
+    - Unique Local IPv6: fc00::/7
     
     Args:
         ip: IP address string to check
@@ -111,13 +135,13 @@ def is_private_ip(ip: str) -> bool:
     """
     try:
         ip_obj = ipaddress.ip_address(ip)
-        return ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local
+        return any(ip_obj in net for net in PRIVATE_NETWORKS)
     except ValueError:
         logging.warning(f"Invalid IP address format: {ip}")
         return False
 
 
-def get_local_ip() -> str:
+def get_local_ip(max_retries: int = MAX_IP_RETRY_ATTEMPTS, retry_delay: float = IP_RETRY_DELAY_SECONDS) -> str:
     """
     Detect the public IP address of this sensor by querying the NetWatch API.
     
@@ -125,6 +149,10 @@ def get_local_ip() -> str:
     network issues during startup. If the IP cannot be determined after
     all retries, the program exits.
     
+    Args:
+        max_retries: Maximum number of detection attempts before giving up.
+        retry_delay: Delay in seconds between retries.
+
     Returns:
         Public IP address as a string
         
@@ -133,7 +161,7 @@ def get_local_ip() -> str:
     """
     url = f"{get_env('NETWATCH_COLLECTOR_URL', DEFAULT_COLLECTOR_URL)}/check_ip"
     
-    for attempt in range(MAX_IP_RETRY_ATTEMPTS):
+    for attempt in range(max_retries):
         try:
             response = requests.get(url, timeout=CHECK_IP_TIMEOUT)
             if response.status_code == 200:
@@ -142,21 +170,21 @@ def get_local_ip() -> str:
                 return local_ip
             else:
                 logging.warning(
-                    f"[!] Attempt {attempt + 1}/{MAX_IP_RETRY_ATTEMPTS}: "
+                    f"[!] Attempt {attempt + 1}/{max_retries}: "
                     f"API returned status {response.status_code}"
                 )
         except requests.exceptions.RequestException as e:
             logging.error(
-                f"[!] Attempt {attempt + 1}/{MAX_IP_RETRY_ATTEMPTS}: "
+                f"[!] Attempt {attempt + 1}/{max_retries}: "
                 f"Error getting local IP: {e}"
             )
         
         # Don't sleep after the last failed attempt
-        if attempt < MAX_IP_RETRY_ATTEMPTS - 1:
-            time.sleep(IP_RETRY_DELAY_SECONDS)
+        if attempt < max_retries - 1:
+            time.sleep(retry_delay)
     
     logging.error("[!] Unable to get local IP after all retries. Exiting.")
-    exit(1)
+    sys.exit(1)
 
 
 # ============================================================================
@@ -230,8 +258,10 @@ def attack_forward_worker() -> None:
     """
     # Use Session for connection pooling (more efficient than individual requests)
     session = requests.Session()
+    # Set a User-Agent header for better identification
     session.headers.update({
-        "Authorization": get_env("NETWATCH_COLLECTOR_AUTHORIZATION", "")
+        "Authorization": get_env("NETWATCH_COLLECTOR_AUTHORIZATION", ""),
+        "User-Agent": "NetWatch-Telnet-AttackPod/0.2"
     })
     url = f"{get_env('NETWATCH_COLLECTOR_URL', DEFAULT_COLLECTOR_URL)}/v2/add_attack/telnet_bruteforce"
 
@@ -280,50 +310,126 @@ def attack_forward_worker() -> None:
 # TELNET PROTOCOL HANDLING
 # ============================================================================
 
-def telnet_read_filtered_input(client_socket: socket.socket) -> str:
+def filter_telnet_iac(data: bytes) -> Tuple[bytearray, bytes]:
     """
-    Read from a Telnet socket and filter out IAC (Interpret As Command) sequences.
+    Filter out Telnet IAC (Interpret As Command) sequences per RFC 854.
     
-    Telnet uses in-band signaling where command bytes (starting with 0xFF)
-    are mixed with user data. This function strips out the IAC command
-    sequences and returns only the actual text entered by the user.
+    Handles:
+    - Escaped IAC (0xFF 0xFF) -> literal 0xFF
+    - Option negotiation (WILL, WONT, DO, DONT) -> 3 bytes
+    - Subnegotiation (SB ... SE) -> variable length
+    - Other 2-byte commands (NOP, DM, etc.) -> 2 bytes
     
-    IAC commands are typically 3 bytes: [0xFF] [COMMAND] [OPTION]
+    Args:
+        data: Raw byte stream received from socket
+        
+    Returns:
+        Tuple of (clean_payload_bytes, remaining_incomplete_iac_bytes)
+    """
+    clean_data = bytearray()
+    i = 0
+    n = len(data)
+    
+    while i < n:
+        if data[i] == TELNET_IAC:
+            # If IAC is at the very end with no command byte, return as leftover
+            if i + 1 >= n:
+                return clean_data, data[i:]
+            
+            cmd = data[i + 1]
+            if cmd == TELNET_IAC:
+                # Escaped IAC (0xFF 0xFF) evaluates to literal 0xFF data
+                clean_data.append(TELNET_IAC)
+                i += 2
+            elif cmd in (TELNET_WILL, TELNET_WONT, TELNET_DO, TELNET_DONT):
+                # 3-byte command: IAC <verb> <option>
+                if i + 2 >= n:
+                    # Incomplete 3-byte command
+                    return clean_data, data[i:]
+                i += 3
+            elif cmd == TELNET_SB:
+                # Subnegotiation: IAC SB ... IAC SE
+                # Look for terminating IAC SE (0xFF 0xF0)
+                se_index = -1
+                j = i + 2
+                while j < n:
+                    if data[j] == TELNET_IAC and j + 1 < n and data[j + 1] == TELNET_SE:
+                        se_index = j + 1
+                        break
+                    j += 1
+                if se_index != -1:
+                    i = se_index + 1
+                else:
+                    # Incomplete subnegotiation, wait for more data
+                    return clean_data, data[i:]
+            else:
+                # Other 2-byte commands (NOP, BREAK, IP, AO, AYT, EC, EL, GA)
+                i += 2
+        else:
+            clean_data.append(data[i])
+            i += 1
+            
+    return clean_data, b""
+
+
+def telnet_read_filtered_input(
+    client_socket: socket.socket, 
+    max_length: int = MAX_INPUT_LENGTH
+) -> str:
+    """
+    Read a complete line from a Telnet socket, filtering out IAC command sequences
+    and respecting maximum input length caps.
+    
+    Accumulates data until a newline (\\r or \\n) delimiter is encountered or
+    until max retries/timeouts are reached.
     
     Args:
         client_socket: Connected client socket
+        max_length: Maximum allowed characters to prevent memory exhaustion
         
     Returns:
         Clean text input from user, or empty string on error/no data
     """
-    try:
-        data = client_socket.recv(SOCKET_RECV_BUFFER)
-        if not data:
-            return ""
-
-        # Filter out Telnet IAC (0xFF) command sequences
-        clean_data = bytearray()
-        i = 0
-        while i < len(data):
-            if data[i] == TELNET_IAC:
-                # Skip this IAC command (typically 3 bytes)
-                i += TELNET_COMMAND_LENGTH
+    accumulated_clean = bytearray()
+    iac_buffer = b""
+    retries = 0
+    
+    while retries < MAX_INPUT_RETRIES and len(accumulated_clean) < max_length:
+        try:
+            raw_chunk = client_socket.recv(SOCKET_RECV_BUFFER)
+            if not raw_chunk:
+                break
+            
+            # Combine leftover incomplete IAC bytes with newly received chunk
+            clean_chunk, iac_buffer = filter_telnet_iac(iac_buffer + raw_chunk)
+            
+            if clean_chunk:
+                accumulated_clean.extend(clean_chunk)
+                
+                # Check for line completion (\r or \n)
+                if b"\n" in clean_chunk or b"\r" in clean_chunk:
+                    break
             else:
-                # Regular user data - keep it
-                clean_data.append(data[i])
-                i += 1
+                # Only IAC commands received in this chunk
+                retries += 1
+                time.sleep(INPUT_RETRY_DELAY)
+                
+        except socket.timeout:
+            break
+        except Exception as e:
+            logging.debug(f"Error reading from socket: {e}")
+            break
+            
+    # Decode to UTF-8, strip whitespace and line endings, enforce max length cap
+    decoded = accumulated_clean.decode("utf-8", errors="ignore").strip()
+    return decoded[:max_length]
 
-        # Decode to UTF-8, ignoring invalid sequences
-        return clean_data.decode('utf-8', errors='ignore').strip()
-        
-    except socket.timeout:
-        return ""
-    except Exception as e:
-        logging.debug(f"Error reading from socket: {e}")
-        return ""
 
-
-def handle_client(client_socket: socket.socket, ATTACKPOD_LOCAL_IP: str) -> None:
+def handle_client(
+    client_socket: socket.socket, 
+    ATTACKPOD_LOCAL_IP: str, 
+    semaphore: Optional[threading.BoundedSemaphore] = None
+) -> None:
     """
     Handle a single Telnet client connection.
     
@@ -341,6 +447,7 @@ def handle_client(client_socket: socket.socket, ATTACKPOD_LOCAL_IP: str) -> None
     Args:
         client_socket: Connected client socket
         ATTACKPOD_LOCAL_IP: This sensor's public IP address
+        semaphore: Optional semaphore released when the connection finishes
     """
     client_socket.settimeout(CLIENT_TIMEOUT_SECONDS)
     
@@ -405,13 +512,18 @@ def handle_client(client_socket: socket.socket, ATTACKPOD_LOCAL_IP: str) -> None
             client_socket.close()
         except:
             pass
+        if semaphore:
+            semaphore.release()
 
 
 # ============================================================================
 # SERVER MAIN LOOP
 # ============================================================================
 
-def start_telnet_server(local_ip: str) -> None:
+def start_telnet_server(
+    local_ip: str, 
+    max_clients: int = MAX_CONCURRENT_CLIENTS
+) -> None:
     """
     Start the main Telnet server loop.
     
@@ -424,6 +536,7 @@ def start_telnet_server(local_ip: str) -> None:
     
     Args:
         local_ip: This sensor's public IP address (for attack reporting)
+        max_clients: Maximum concurrent active client connections permitted
     """
     # Create TCP socket
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -433,8 +546,11 @@ def start_telnet_server(local_ip: str) -> None:
     server.bind(('0.0.0.0', TELNET_INTERNAL_PORT))
     server.listen(TELNET_LISTEN_BACKLOG)
     
+    semaphore = threading.BoundedSemaphore(max_clients)
+
     logging.info(f"[+] Telnet server listening on internal port {TELNET_INTERNAL_PORT}")
     logging.info(f"[+] Attack submissions will report destination IP: {local_ip}")
+    logging.info(f"[+] Max concurrent client connections: {max_clients}")
 
     # Main accept loop
     while True:
@@ -442,11 +558,27 @@ def start_telnet_server(local_ip: str) -> None:
             client_socket, addr = server.accept()
             logging.debug(f"[+] Connection from {addr[0]}:{addr[1]}")
             
+            # Non-blocking acquisition to protect against DoS / connection floods
+            if not semaphore.acquire(blocking=False):
+                logging.warning(
+                    f"[!] Connection limit ({max_clients}) reached. "
+                    f"Rejecting connection from {addr[0]}:{addr[1]}"
+                )
+                try:
+                    client_socket.sendall(b"Server busy. Connection closed.\r\n")
+                except:
+                    pass
+                try:
+                    client_socket.close()
+                except:
+                    pass
+                continue
+
             # Spawn a new daemon thread to handle this client
             # Daemon threads automatically terminate when main program exits
             threading.Thread(
                 target=handle_client, 
-                args=(client_socket, local_ip), 
+                args=(client_socket, local_ip, semaphore), 
                 daemon=True
             ).start()
             
