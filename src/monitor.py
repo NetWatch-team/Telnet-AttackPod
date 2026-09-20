@@ -91,6 +91,20 @@ def get_env(key: str, fallback: str) -> str:
     return os.getenv(key, default=fallback)
 
 
+def mask_sensitive_value(value: str) -> str:
+    """
+    Mask sensitive values (such as passwords) for secure logging.
+    
+    Reveals only first and last characters when length is sufficient,
+    masking the rest to prevent cleartext exposure in logs.
+    """
+    if not value:
+        return "(empty)"
+    if len(value) <= 2:
+        return "***"
+    return f"{value[0]}{'*' * (len(value) - 2)}{value[-1]}"
+
+
 def _check_if_in_test_mode() -> bool:
     """
     Check if the sensor is running in test mode.
@@ -491,7 +505,8 @@ def handle_client(
 
         # Step 4: Log and submit the attack
         remote_ip, remote_port = client_socket.getpeername()
-        logging.info(f"[CAPTURE] {username} / {password} from {remote_ip}:{remote_port}")
+        masked_pwd = mask_sensitive_value(password)
+        logging.info(f"[CAPTURE] {username} / {masked_pwd} from {remote_ip}:{remote_port}")
 
         evidence = f"Telnet login attempt by username '{username}' from ip '{remote_ip}'"
         submit_attack(remote_ip, username, password, evidence, ATTACKPOD_LOCAL_IP, remote_port)

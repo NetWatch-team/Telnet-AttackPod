@@ -122,6 +122,16 @@ class TestMonitorAdvancedFunctions(unittest.TestCase):
         self.assertEqual(len(result), 10)
         self.assertEqual(result, "A" * 10)
 
+    def test_mask_sensitive_value(self):
+        """Test sensitive value masking utility"""
+        from monitor import mask_sensitive_value
+        
+        self.assertEqual(mask_sensitive_value(""), "(empty)")
+        self.assertEqual(mask_sensitive_value("a"), "***")
+        self.assertEqual(mask_sensitive_value("ab"), "***")
+        self.assertEqual(mask_sensitive_value("abc"), "a*c")
+        self.assertEqual(mask_sensitive_value("password123"), "p*********3")
+
 
 if __name__ == '__main__':
     unittest.main()
