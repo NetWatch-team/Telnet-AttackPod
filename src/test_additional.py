@@ -42,8 +42,9 @@ class TestMonitorAdvancedFunctions(unittest.TestCase):
         ip = get_local_ip()
         self.assertEqual(ip, '203.0.113.42')
         
+    @patch('monitor.time.sleep')
     @patch('monitor.requests.get')
-    def test_get_local_ip_failure(self, mock_get):
+    def test_get_local_ip_failure(self, mock_get, mock_sleep):
         """Test IP detection failure handling"""
         # Mock a failed response from the API
         mock_response = MagicMock()
@@ -53,12 +54,13 @@ class TestMonitorAdvancedFunctions(unittest.TestCase):
         # Import after setting environment
         from monitor import get_local_ip
         
-        # Mock exit to avoid actual program termination during testing
-        with patch('monitor.exit') as mock_exit:
-            # This should call exit when all retries are exhausted
+        # Mock sys.exit to avoid actual program termination during testing
+        with patch('monitor.sys.exit') as mock_exit:
+            mock_exit.side_effect = SystemExit(1)
+            # This should call sys.exit when all retries are exhausted
             with self.assertRaises(SystemExit):
-                get_local_ip()
-            mock_exit.assert_called_once()
+                get_local_ip(max_retries=2, retry_delay=0)
+            mock_exit.assert_called_once_with(1)
 
 
 if __name__ == '__main__':

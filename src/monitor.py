@@ -21,6 +21,7 @@ import time
 import socket
 import queue
 import json
+import sys
 
 # ============================================================================
 # CONFIGURATION CONSTANTS
@@ -132,7 +133,7 @@ def is_private_ip(ip: str) -> bool:
         return False
 
 
-def get_local_ip() -> str:
+def get_local_ip(max_retries: int = MAX_IP_RETRY_ATTEMPTS, retry_delay: float = IP_RETRY_DELAY_SECONDS) -> str:
     """
     Detect the public IP address of this sensor by querying the NetWatch API.
     
@@ -140,6 +141,10 @@ def get_local_ip() -> str:
     network issues during startup. If the IP cannot be determined after
     all retries, the program exits.
     
+    Args:
+        max_retries: Maximum number of detection attempts before giving up.
+        retry_delay: Delay in seconds between retries.
+
     Returns:
         Public IP address as a string
         
@@ -148,7 +153,7 @@ def get_local_ip() -> str:
     """
     url = f"{get_env('NETWATCH_COLLECTOR_URL', DEFAULT_COLLECTOR_URL)}/check_ip"
     
-    for attempt in range(MAX_IP_RETRY_ATTEMPTS):
+    for attempt in range(max_retries):
         try:
             response = requests.get(url, timeout=CHECK_IP_TIMEOUT)
             if response.status_code == 200:
@@ -157,21 +162,21 @@ def get_local_ip() -> str:
                 return local_ip
             else:
                 logging.warning(
-                    f"[!] Attempt {attempt + 1}/{MAX_IP_RETRY_ATTEMPTS}: "
+                    f"[!] Attempt {attempt + 1}/{max_retries}: "
                     f"API returned status {response.status_code}"
                 )
         except requests.exceptions.RequestException as e:
             logging.error(
-                f"[!] Attempt {attempt + 1}/{MAX_IP_RETRY_ATTEMPTS}: "
+                f"[!] Attempt {attempt + 1}/{max_retries}: "
                 f"Error getting local IP: {e}"
             )
         
         # Don't sleep after the last failed attempt
-        if attempt < MAX_IP_RETRY_ATTEMPTS - 1:
-            time.sleep(IP_RETRY_DELAY_SECONDS)
+        if attempt < max_retries - 1:
+            time.sleep(retry_delay)
     
     logging.error("[!] Unable to get local IP after all retries. Exiting.")
-    exit(1)
+    sys.exit(1)
 
 
 # ============================================================================

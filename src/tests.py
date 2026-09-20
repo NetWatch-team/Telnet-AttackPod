@@ -101,18 +101,21 @@ class TestMonitorFunctions(unittest.TestCase):
         ip = monitor.get_local_ip()
         self.assertEqual(ip, '203.0.113.42')
         
+    @patch('monitor.time.sleep')
     @patch('monitor.requests.get')
-    def test_get_local_ip_failure(self, mock_get):
+    def test_get_local_ip_failure(self, mock_get, mock_sleep):
         """Test IP detection failure handling"""
         mock_response = MagicMock()
         mock_response.status_code = 500
         mock_get.return_value = mock_response
         
-        # Mock the exit function to avoid actual exit during testing
-        with patch('monitor.exit') as mock_exit:
-            # This should call exit when all retries are exhausted
-            monitor.get_local_ip()
-            mock_exit.assert_called_once()
+        # Mock sys.exit to avoid actual exit during testing
+        with patch('monitor.sys.exit') as mock_exit:
+            mock_exit.side_effect = SystemExit(1)
+            # This should call sys.exit when all retries are exhausted
+            with self.assertRaises(SystemExit):
+                monitor.get_local_ip(max_retries=2, retry_delay=0)
+            mock_exit.assert_called_once_with(1)
 
 if __name__ == '__main__':
     # Restore original get_env before running tests

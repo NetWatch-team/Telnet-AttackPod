@@ -81,8 +81,9 @@ class TestMonitorIntegration(unittest.TestCase):
         # Just verify it imports - actual function execution would need network
         self.assertTrue(callable(get_local_ip))
         
+    @patch('monitor.time.sleep')
     @patch('monitor.requests.get')
-    def test_get_local_ip_failure_handling(self, mock_get):
+    def test_get_local_ip_failure_handling(self, mock_get, mock_sleep):
         """Test that get_local_ip handles API failures correctly"""
         # Mock a failed response from the API
         mock_response = MagicMock()
@@ -90,13 +91,12 @@ class TestMonitorIntegration(unittest.TestCase):
         mock_get.return_value = mock_response
         
         with patch('monitor.logging') as mock_logging:
-            # This should not actually call exit in our test environment
-            try:
+            with patch('monitor.sys.exit') as mock_exit:
+                mock_exit.side_effect = SystemExit(1)
                 from monitor import get_local_ip
-                # Should return None or raise exception during testing
-                ip = get_local_ip()
-            except Exception:
-                pass  # Expected behavior
+                with self.assertRaises(SystemExit):
+                    get_local_ip(max_retries=2, retry_delay=0)
+                mock_exit.assert_called_once_with(1)
     
     def test_attack_submission_structure(self):
         """Test that attack submission produces correct structure"""
