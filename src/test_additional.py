@@ -132,6 +132,32 @@ class TestMonitorAdvancedFunctions(unittest.TestCase):
         self.assertEqual(mask_sensitive_value("abc"), "a*c")
         self.assertEqual(mask_sensitive_value("password123"), "p*********3")
 
+    def test_attack_queue_bounded_drop(self):
+        """Test that attack_queue is bounded and drops excess attacks without crashing"""
+        import queue
+        from monitor import submit_attack, attack_queue, MAX_QUEUE_SIZE
+        
+        self.assertGreater(attack_queue.maxsize, 0)
+        
+        # Test full queue handling with a small test queue
+        test_q = queue.Queue(maxsize=1)
+        with patch('monitor.attack_queue', test_q):
+            # First put succeeds
+            submit_attack("8.8.8.8", "user1", "pass1", "ev1", "1.2.3.4", 1234)
+            self.assertEqual(test_q.qsize(), 1)
+            # Second put on full queue drops cleanly with warning instead of blocking or crashing
+            submit_attack("8.8.8.8", "user2", "pass2", "ev2", "1.2.3.4", 1235)
+            self.assertEqual(test_q.qsize(), 1)
+
+    def test_validate_configuration_warnings(self):
+        """Test validate_configuration detects missing credentials"""
+        from monitor import validate_configuration
+        
+        with patch('monitor.logging.warning') as mock_warn:
+            # Without auth configured, warning should be logged
+            validate_configuration()
+            self.assertTrue(mock_warn.called)
+
 
 if __name__ == '__main__':
     unittest.main()

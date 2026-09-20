@@ -57,13 +57,14 @@ MAX_INPUT_RETRIES = int(os.getenv("MAX_INPUT_RETRIES", "30"))  # max attempts to
 INPUT_RETRY_DELAY = float(os.getenv("INPUT_RETRY_DELAY", "0.1"))  # delay between empty input retries (seconds)
 SOCKET_RECV_BUFFER = int(os.getenv("SOCKET_RECV_BUFFER", "1024"))  # bytes to read at once
 MAX_INPUT_LENGTH = int(os.getenv("MAX_INPUT_LENGTH", "256"))  # max chars allowed for username/password
+MAX_QUEUE_SIZE = int(os.getenv("MAX_QUEUE_SIZE", "10000"))  # max pending attack submissions
 
 # ============================================================================
 # GLOBAL STATE
 # ============================================================================
 
-# Thread-safe queue for attacks pending submission to NetWatch
-attack_queue = queue.Queue()
+# Thread-safe bounded queue for attacks pending submission to NetWatch
+attack_queue = queue.Queue(maxsize=MAX_QUEUE_SIZE)
 
 # Configure logging
 logging.basicConfig(
@@ -116,6 +117,24 @@ def _check_if_in_test_mode() -> bool:
         True if test mode is enabled, False otherwise
     """
     return get_env("NETWATCH_TEST_MODE", "false").lower() == "true"
+
+
+def validate_configuration() -> None:
+    """
+    Validate critical environment variables at startup and log warnings if missing.
+    """
+    auth_token = get_env("NETWATCH_COLLECTOR_AUTHORIZATION", "")
+    if not auth_token or auth_token == "<API_KEY_FROM_NETWATCH_TEAM>":
+        logging.warning(
+            "[!] WARNING: NETWATCH_COLLECTOR_AUTHORIZATION is not configured. "
+            "Attacks will fail to submit to the NetWatch collector API."
+        )
+    
+    uuid = get_env("SENSOR_UUID", "")
+    if not uuid or uuid == "your-unique-uuid-here":
+        logging.warning(
+            "[!] WARNING: SENSOR_UUID is not configured or using placeholder value."
+        )
 
 
 # Private and non-routable network ranges per RFC 1918 and related standards
@@ -255,8 +274,14 @@ def submit_attack(
         }
     }
     
-    # Queue the attack for async submission
-    attack_queue.put(json_dict)
+    # Queue the attack for async submission (drop and log warning if queue is full)
+    try:
+        attack_queue.put(json_dict, block=False)
+    except queue.Full:
+        logging.warning(
+            f"[!] Attack queue full ({MAX_QUEUE_SIZE} items). "
+            f"Dropping attack telemetry from {ip}"
+        )
 
 
 def attack_forward_worker() -> None:
@@ -610,6 +635,9 @@ if __name__ == '__main__':
     logging.info("=" * 60)
     logging.info("[+] Starting NetWatch Telnet AttackPod")
     logging.info("=" * 60)
+
+    # Validate essential environment configurations
+    validate_configuration()
 
     # Display test mode warning prominently
     if _check_if_in_test_mode():
