@@ -87,6 +87,16 @@ telnet localhost 23
 
 Enter any username and password when prompted. You should see the attack captured in the logs.
 
+## Running Tests
+
+Unit tests can be run with pytest:
+
+```bash
+cd src/
+pip install -r requirements-test.txt
+pytest tests.py -v
+```
+
 ## RFC 1918 Private IP Filtering
 
 The Telnet-AttackPod automatically filters out attacks involving private/local IP addresses to prevent false positives and reduce backend processing load. Attacks are **not reported** to the NetWatch collector if either the source IP or destination IP is a private/non-routable address.
@@ -126,9 +136,7 @@ The NetWatch backend frequently updates lists of IP addresses that have been ide
 
 To get direct access to the data that your sensor submitted to the NetWatch backend, you can use the Community API. You can find the API documentation at: https://community-api.netwatch.team. Currently, the API allows you to retrieve the raw data that your sensor submitted to the NetWatch backend, as well as correlated data from other sensors and customized block lists for your environment. (Please be aware that there is a fair use policy in place for the Community API.)
 
-### Daily Attack Summary
 
-On the Daily Attack Summary GitHub repository, you can find a daily export of all abusive IPs and unique credentials seen by all sensors. You can find the repository at: https://github.com/NetWatch-team/Daily-Attack-Summary
 
 ### Research & Collaboration
 
@@ -172,6 +180,14 @@ If you want to build Telnet-AttackPod from source you can do so by:
 ```bash
 docker compose build --no-cache
 ```
+
+To build for multiple CPU architectures:
+
+```bash
+./build.sh
+```
+
+This will create images for both AMD64 and ARM64 architectures.
 
 #### Advanced Configuration
 
