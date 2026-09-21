@@ -40,7 +40,7 @@ MAX_IP_RETRY_ATTEMPTS = int(os.getenv("MAX_IP_RETRY_ATTEMPTS", "50"))  # max att
 IP_RETRY_DELAY_SECONDS = int(os.getenv("IP_RETRY_DELAY_SECONDS", "10"))  # delay between IP detection retries
 
 # Telnet Server Configuration
-TELNET_INTERNAL_PORT = os.getenv("TELNET_INTERNAL_PORT", "2323")  # non-privileged port inside Docker
+TELNET_INTERNAL_PORT = int(os.getenv("TELNET_INTERNAL_PORT", "2323"))  # non-privileged port inside Docker
 TELNET_LISTEN_BACKLOG = int(os.getenv("TELNET_LISTEN_BACKLOG", "100"))  # max queued connections
 CLIENT_TIMEOUT_SECONDS = int(os.getenv("CLIENT_TIMEOUT_SECONDS", "30"))  # timeout for client connections
 MAX_CONCURRENT_CLIENTS = int(os.getenv("MAX_CONCURRENT_CLIENTS", "100"))  # max concurrent client connections
