@@ -1,2 +1,5 @@
 # Suppress base python image setuptools false positive
 CVE-2025-47273
+# Debian trixie zlib1g pending package sync
+CVE-2026-76844
+CVE-2026-85091
