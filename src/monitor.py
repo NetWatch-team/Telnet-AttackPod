@@ -43,6 +43,7 @@ MAX_IP_RETRY_ATTEMPTS = int(os.getenv("MAX_IP_RETRY_ATTEMPTS", "50"))  # max att
 IP_RETRY_DELAY_SECONDS = int(os.getenv("IP_RETRY_DELAY_SECONDS", "10"))  # delay between IP detection retries
 
 # Telnet Server Configuration
+TELNET_BIND_HOST = os.getenv("TELNET_BIND_HOST", "0.0.0.0")  # nosec B104
 TELNET_INTERNAL_PORT = int(os.getenv("TELNET_INTERNAL_PORT", "2323"))  # non-privileged port inside Docker
 TELNET_LISTEN_BACKLOG = int(os.getenv("TELNET_LISTEN_BACKLOG", "100"))  # max queued connections
 CLIENT_TIMEOUT_SECONDS = int(os.getenv("CLIENT_TIMEOUT_SECONDS", "30"))  # timeout for client connections
@@ -651,13 +652,13 @@ def start_telnet_server(local_ip: str, max_clients: int = MAX_CONCURRENT_CLIENTS
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-    # Bind to all interfaces on the internal non-privileged port
-    server.bind(("0.0.0.0", TELNET_INTERNAL_PORT))  # nosec B104
+    # Bind to configured interface on the internal non-privileged port
+    server.bind((TELNET_BIND_HOST, TELNET_INTERNAL_PORT))
     server.listen(TELNET_LISTEN_BACKLOG)
 
     semaphore = threading.BoundedSemaphore(max_clients)
 
-    logging.info(f"[+] Telnet server listening on internal port {TELNET_INTERNAL_PORT}")
+    logging.info(f"[+] Telnet server listening on {TELNET_BIND_HOST}:{TELNET_INTERNAL_PORT}")
     logging.info(f"[+] Attack submissions will report destination IP: {local_ip}")
     logging.info(f"[+] Max concurrent client connections: {max_clients}")
 
